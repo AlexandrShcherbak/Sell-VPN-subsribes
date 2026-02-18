@@ -5,7 +5,6 @@ from urllib.parse import urljoin
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.utils.i18n import I18n
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
