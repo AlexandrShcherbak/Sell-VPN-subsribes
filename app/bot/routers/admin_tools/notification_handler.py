@@ -69,6 +69,21 @@ async def _send_notification_batch(
     return sent_user_ids, sent_message_ids
 
 
+def _build_notification_pairs(
+    chat_ids: list[int] | None,
+    message_ids: list[int] | None,
+) -> list[tuple[int, int]]:
+    if not chat_ids or not message_ids:
+        return []
+
+    if len(chat_ids) != len(message_ids):
+        logger.warning(
+            f"Notifications state contains inconsistent data: {len(chat_ids)} chat ids and {len(message_ids)} message ids."
+        )
+
+    return list(zip(chat_ids, message_ids))
+
+
 class NotificationStates(StatesGroup):
     user_id = State()
     message_to_user = State()
@@ -122,7 +137,7 @@ async def message_user_id(
     if message.forward_from:
         user_id = str(message.forward_from.id)
     else:
-        user_id = message.text.strip()
+        user_id = message.text.strip() if message.text else ""
     logger.info(f"Admin {user.tg_id} sent user id {user_id} for notification.")
 
     if is_valid_user_id(user_id):
@@ -162,7 +177,7 @@ async def message_to_user(
     state: FSMContext,
     services: ServicesContainer,
 ) -> None:
-    text = message.text.strip()
+    text = message.text.strip() if message.text else ""
     user_ids = await state.get_value(NOTIFICATION_CHAT_IDS_KEY)
     user_id = user_ids[0]
     logger.info(f"Admin {user.tg_id} sent message for user {user_id}.")
@@ -248,7 +263,7 @@ async def message_to_all(
     state: FSMContext,
     services: ServicesContainer,
 ) -> None:
-    text = message.text.strip()
+    text = message.text.strip() if message.text else ""
     logger.info(f"Admin {user.tg_id} sent message for all.")
 
     if is_valid_message_text(text):
@@ -385,7 +400,7 @@ async def message_edit(
     state: FSMContext,
     services: ServicesContainer,
 ) -> None:
-    text = message.text.strip()
+    text = message.text.strip() if message.text else ""
     logger.info(f"Admin {user.tg_id} edit notification.")
 
     if is_valid_message_text(text):
@@ -420,7 +435,8 @@ async def callback_confirm_edit_notification(
     text = await state.get_value(NOTIFICATION_PRE_MESSAGE_TEXT_KEY)
     chat_ids = await state.get_value(NOTIFICATION_CHAT_IDS_KEY)
     last_message_ids = await state.get_value(NOTIFICATION_LAST_MESSAGE_IDS_KEY)
-    chat_ids_count = len(chat_ids)
+    notification_pairs = _build_notification_pairs(chat_ids=chat_ids, message_ids=last_message_ids)
+    notifications_count = len(notification_pairs)
 
     if not is_valid_message_text(text):
         await services.notification.notify_by_message(
@@ -432,19 +448,20 @@ async def callback_confirm_edit_notification(
 
     await state.update_data({NOTIFICATION_MESSAGE_TEXT_KEY: text})
 
-    if chat_ids and last_message_ids and chat_ids_count > 0:
-        if chat_ids_count > 1:
+    if notifications_count > 0:
+        if notifications_count > 1:
             await services.notification.notify_by_message(
                 message=callback.message,
                 text=_("notification:ntf:editing_notification").format(
-                    count=chat_ids_count,
+                    count=notifications_count,
                 ),
                 duration=5,
             )
         success = 0
-        edited = False
-        for chat_id, last_message_id in zip(chat_ids, last_message_ids):
-
+        updated_chat_ids: list[int] = []
+        updated_message_ids: list[int] = []
+        
+        for chat_id, last_message_id in notification_pairs:
             try:
                 edited = await callback.message.bot.edit_message_text(
                     text=text,
@@ -455,19 +472,20 @@ async def callback_confirm_edit_notification(
 
                 if edited:
                     success += 1
+                    updated_chat_ids.append(chat_id)
+                    updated_message_ids.append(last_message_id)
             except Exception as exception:
                 logger.error(
                     f"Error editing message {last_message_id} from chat {chat_id}: {exception}"
                 )
-                chat_ids.remove(chat_id)
-                last_message_ids.remove(last_message_id)
 
-        await state.update_data({NOTIFICATION_CHAT_IDS_KEY: chat_ids})
-        await state.update_data({NOTIFICATION_LAST_MESSAGE_IDS_KEY: last_message_ids})
+        
+        await state.update_data({NOTIFICATION_CHAT_IDS_KEY: updated_chat_ids})
+        await state.update_data({NOTIFICATION_LAST_MESSAGE_IDS_KEY: updated_message_ids})
 
         await show_notification_main(message=callback.message, state=state)
 
-        if not edited:
+        if success == 0:
             await services.notification.notify_by_message(
                 message=callback.message,
                 text=_("notification:ntf:edited_failed"),
@@ -475,12 +493,12 @@ async def callback_confirm_edit_notification(
             )
             return None
 
-        if chat_ids_count > 1:
+        if notifications_count > 1:
             await services.notification.notify_by_message(
                 message=callback.message,
                 text=_("notification:ntf:edited_success_all").format(
                     success=success,
-                    failed=chat_ids_count - success,
+                    failed=notifications_count - success,
                 ),
                 duration=5,
             )
@@ -508,13 +526,14 @@ async def callback_delete_notification(
     logger.info(f"Admin {user.tg_id} delete notification.")
     chat_ids = await state.get_value(NOTIFICATION_CHAT_IDS_KEY)
     last_message_ids = await state.get_value(NOTIFICATION_LAST_MESSAGE_IDS_KEY)
-    chat_ids_count = len(chat_ids) if chat_ids else 0
+    notification_pairs = _build_notification_pairs(chat_ids=chat_ids, message_ids=last_message_ids)
+    notifications_count = len(notification_pairs)
 
-    if last_message_ids and chat_ids and chat_ids_count > 0:
+    if notifications_count > 0:
         success = 0
         deleted_any = False
 
-        for chat_id, last_message_id in zip(chat_ids, last_message_ids):
+        for chat_id, last_message_id in notification_pairs:
             try:
                 deleted = await callback.message.bot.delete_message(
                     chat_id=chat_id,
@@ -541,12 +560,12 @@ async def callback_delete_notification(
             )
             return None
 
-        if chat_ids_count > 1:
+        if notifications_count > 1:
             await services.notification.notify_by_message(
                 message=callback.message,
                 text=_("notification:ntf:deleted_success_all").format(
                     success=success,
-                    failed=chat_ids_count - success,
+                    failed=notifications_count - success,
                 ),
                 duration=5,
             )
