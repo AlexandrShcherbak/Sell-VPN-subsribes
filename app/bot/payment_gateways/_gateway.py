@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.bot.models import ServicesContainer, SubscriptionData
 from app.bot.routers.main_menu.handler import redirect_to_main_menu
 from app.bot.utils.constants import (
-    DEFAULT_LANGUAGE,
     EVENT_PAYMENT_CANCELED_TAG,
     EVENT_PAYMENT_SUCCEEDED_TAG,
     Currency,
@@ -103,7 +102,7 @@ class PaymentGateway(ABC):
             ),
         )
 
-        locale = user.language_code if user else DEFAULT_LANGUAGE
+        locale = user.language_code
         with self.i18n.use_locale(locale):
             await redirect_to_main_menu(
                 bot=self.bot,
