@@ -101,10 +101,28 @@ class User(Base):
         return None
 
     @classmethod
-    async def get_all(cls, session: AsyncSession) -> list[Self]:
-        query = await session.execute(select(User).options(selectinload(User.server)))
+    async def get_all(
+        cls,
+        session: AsyncSession,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[Self]:
+        statement = select(User).options(selectinload(User.server))
+
+        if offset is not None:
+            statement = statement.offset(offset)
+
+        if limit is not None:
+            statement = statement.limit(limit)
+
+        query = await session.execute(statement)
         return query.scalars().all()
 
+    @classmethod
+    async def count_all(cls, session: AsyncSession) -> int:
+        query = await session.execute(select(func.count()).select_from(User))
+        return query.scalar_one()
+    
     @classmethod
     async def create(cls, session: AsyncSession, tg_id: int, **kwargs: Any) -> Self | None:
         user = await User.get(session=session, tg_id=tg_id)
