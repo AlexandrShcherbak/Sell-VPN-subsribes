@@ -168,7 +168,10 @@ class VPNService:
             total_gb=total_gb,
         )
         inbound_id = await self.server_pool_service.get_inbound_id(connection.api)
-
+        if inbound_id is None:
+            logger.error(f"No inbound ID available for user {user.tg_id}.")
+            return False
+            
         try:
             await connection.api.client.add(inbound_id=inbound_id, clients=[new_client])
             logger.info(f"Successfully created client for {user.tg_id}")
