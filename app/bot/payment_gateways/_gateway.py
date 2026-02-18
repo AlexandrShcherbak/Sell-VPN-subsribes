@@ -24,9 +24,6 @@ from app.db.models import Transaction, User
 
 logger = logging.getLogger(__name__)
 
-from app.bot.models import SubscriptionData
-from app.bot.utils.constants import Currency
-
 
 class PaymentGateway(ABC):
     name: str
@@ -68,10 +65,20 @@ class PaymentGateway(ABC):
 
         async with self.session() as session:
             transaction = await Transaction.get_by_id(session=session, payment_id=payment_id)
+            if not transaction:
+                logger.error(f"Payment transaction {payment_id} not found.")
+                return None
+
             data = SubscriptionData.unpack(transaction.subscription)
             logger.debug(f"Subscription data unpacked: {data}")
             user = await User.get(session=session, tg_id=data.user_id)
 
+           if not user:
+                logger.error(
+                    f"User {data.user_id} not found for successful payment {payment_id}."
+                )
+                return None
+ 
             await Transaction.update(
                 session=session,
                 payment_id=payment_id,
@@ -145,6 +152,10 @@ class PaymentGateway(ABC):
         logger.info(f"Payment canceled {payment_id}")
         async with self.session() as session:
             transaction = await Transaction.get_by_id(session=session, payment_id=payment_id)
+            if not transaction:
+                logger.error(f"Payment transaction {payment_id} not found.")
+                return None
+                
             data = SubscriptionData.unpack(transaction.subscription)
 
             await Transaction.update(
