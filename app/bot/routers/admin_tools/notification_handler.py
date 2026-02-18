@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -29,6 +30,43 @@ from .keyboard import (
 
 logger = logging.getLogger(__name__)
 router = Router(name=__name__)
+
+
+NOTIFICATION_BROADCAST_BATCH_SIZE = 500
+NOTIFICATION_BROADCAST_CONCURRENCY_LIMIT = 30
+
+
+async def _send_notification_batch(
+    services: ServicesContainer,
+    user_ids: list[int],
+    text: str,
+) -> tuple[list[int], list[int]]:
+    semaphore = asyncio.Semaphore(NOTIFICATION_BROADCAST_CONCURRENCY_LIMIT)
+
+    async def _send(chat_id: int) -> tuple[int, int] | None:
+        async with semaphore:
+            notification = await services.notification.notify_by_id(chat_id=chat_id, text=text)
+            if notification:
+                return chat_id, notification.message_id
+            return None
+
+    results = await asyncio.gather(*(_send(chat_id) for chat_id in user_ids), return_exceptions=True)
+
+    sent_user_ids: list[int] = []
+    sent_message_ids: list[int] = []
+
+    for index, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(
+                f"Error sending broadcast notification to user {user_ids[index]}: {result}"
+            )
+            continue
+
+        if result:
+            sent_user_ids.append(result[0])
+            sent_message_ids.append(result[1])
+
+    return sent_user_ids, sent_message_ids
 
 
 class NotificationStates(StatesGroup):
@@ -254,32 +292,47 @@ async def callback_confirm_send_notification_all(
         return None
 
     await state.update_data({NOTIFICATION_MESSAGE_TEXT_KEY: text})
-    users = await User.get_all(session=session)
+    total_users = await User.count_all(session=session)
     await services.notification.notify_by_message(
         message=callback.message,
         text=_("notification:ntf:sending_to_all").format(
-            count=len(users),
+            count=total_users,
         ),
         duration=5,
     )
-    user_ids = []
-    message_ids = []
 
-    for _user in users:
-        notification = await services.notification.notify_by_id(chat_id=_user.tg_id, text=text)
+    sent_user_ids: list[int] = []
+    sent_message_ids: list[int] = []
+    offset = 0
 
-        if notification:
-            user_ids.append(_user.tg_id)
-            message_ids.append(notification.message_id)
+    while True:
+        users_batch = await User.get_all(
+            session=session,
+            limit=NOTIFICATION_BROADCAST_BATCH_SIZE,
+            offset=offset,
+        )
+        if not users_batch:
+            break
 
-    await state.update_data({NOTIFICATION_CHAT_IDS_KEY: user_ids})
-    await state.update_data({NOTIFICATION_LAST_MESSAGE_IDS_KEY: message_ids})
+        batch_user_ids = [batch_user.tg_id for batch_user in users_batch]
+        batch_sent_user_ids, batch_sent_message_ids = await _send_notification_batch(
+            services=services,
+            user_ids=batch_user_ids,
+            text=text,
+        )
+        sent_user_ids.extend(batch_sent_user_ids)
+        sent_message_ids.extend(batch_sent_message_ids)
+
+        offset += len(users_batch)
+
+    await state.update_data({NOTIFICATION_CHAT_IDS_KEY: sent_user_ids})
+    await state.update_data({NOTIFICATION_LAST_MESSAGE_IDS_KEY: sent_message_ids})
     await show_notification_main(message=callback.message, state=state)
     await services.notification.notify_by_message(
         message=callback.message,
         text=_("notification:ntf:sent_success_all").format(
-            success=len(user_ids),
-            failed=len(users) - len(user_ids),
+            success=len(sent_user_ids),
+            failed=total_users - len(sent_user_ids),
         ),
         duration=5,
     )
@@ -455,13 +508,13 @@ async def callback_delete_notification(
     logger.info(f"Admin {user.tg_id} delete notification.")
     chat_ids = await state.get_value(NOTIFICATION_CHAT_IDS_KEY)
     last_message_ids = await state.get_value(NOTIFICATION_LAST_MESSAGE_IDS_KEY)
-    chat_ids_count = len(chat_ids)
+    chat_ids_count = len(chat_ids) if chat_ids else 0
 
     if last_message_ids and chat_ids and chat_ids_count > 0:
-        for chat_id, last_message_id in zip(chat_ids, last_message_ids):
-            deleted = False
-            success = 0
+        success = 0
+        deleted_any = False
 
+        for chat_id, last_message_id in zip(chat_ids, last_message_ids):
             try:
                 deleted = await callback.message.bot.delete_message(
                     chat_id=chat_id,
@@ -469,6 +522,7 @@ async def callback_delete_notification(
                 )
                 if deleted:
                     success += 1
+                    deleted_any = True
             except Exception as exception:
                 logger.error(
                     f"Error deleting message {last_message_id} from chat {chat_id}: {exception}"
@@ -479,7 +533,7 @@ async def callback_delete_notification(
         await state.update_data({NOTIFICATION_MESSAGE_TEXT_KEY: None})
         await show_notification_main(message=callback.message, state=state)
 
-        if not deleted:
+        if not deleted_any:
             await services.notification.notify_by_message(
                 message=callback.message,
                 text=_("notification:ntf:deleted_failed"),
