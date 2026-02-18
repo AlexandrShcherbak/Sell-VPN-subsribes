@@ -119,6 +119,10 @@ class VPNService:
         async with self.session() as session:
             user = await User.get(session=session, tg_id=user.tg_id)
 
+        if not user:
+            logger.error("User not found while generating subscription key.")
+            return None
+            
         if not user.server_id:
             logger.debug(f"Server ID for user {user.tg_id} not found.")
             return None
@@ -144,7 +148,10 @@ class VPNService:
     ) -> bool:
         logger.info(f"Creating new client {user.tg_id} | {devices} devices {duration} days.")
 
-        await self.server_pool_service.assign_server_to_user(user)
+        assigned = await self.server_pool_service.assign_server_to_user(user)
+        if not assigned:
+            return False
+            
         connection = await self.server_pool_service.get_connection(user)
 
         if not connection:
